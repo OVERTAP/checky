@@ -1,34 +1,18 @@
-name: session-ranking-bot
-
+name: mexc-session-bot-hourly
 on:
   schedule:
-    - cron: "0 * * * *"  # 매 시 정각(UTC)마다 실행 → KST 기준 매시 +9
+    - cron: "0 * * * *"    # 매 정각(UTC) = KST 매시 :00
   workflow_dispatch: {}
-
-permissions:
-  contents: read
-
-concurrency:
-  group: session-ranking-bot
-  cancel-in-progress: false
-
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install ccxt requests python-dotenv; fi
-
+          pip install ccxt requests python-dotenv
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -36,5 +20,4 @@ jobs:
           WATCHLIST_PATH: "watchlist.json"
           TIMEFRAME: "5m"
           TOP_N: "50"
-        run: |
-          python tmp.py
+        run: python tmp.py
