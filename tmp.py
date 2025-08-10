@@ -99,7 +99,6 @@ def resolve_symbol_for_mexc(raw: str, markets: Dict) -> Optional[str]:
         if c not in seen:
             seen.add(c)
             cand_unique.append(c)
-
     for c in cand_unique:
         if c in markets:
             m = markets[c]
@@ -116,17 +115,14 @@ def compute_session_performance(exchange, symbol: str, since_ms: int, until_ms: 
     except Exception as e:
         print(f"[OHLCV 실패] {symbol} - {e}")
         return None
-
     if not ohlcv:
         return None
-
     rows = [row for row in ohlcv if since_ms <= row[0] <= until_ms]
     if len(rows) < 2:
         return None
 
     lows = [(ts, low) for ts, _, _, low, _, _ in rows]
     low_ts, low_price = min(lows, key=lambda x: x[1])
-
     after_low = [row for row in rows if row[0] >= low_ts]
     highs = [(ts, high) for ts, _, high, _, _, _ in after_low]
     high_ts, high_price = max(highs, key=lambda x: x[1])
@@ -145,26 +141,27 @@ def compute_session_performance(exchange, symbol: str, since_ms: int, until_ms: 
     }
 
 # ─────────────────────────────────────────────────────────────
-# 6) 메시지 포맷
+# 6) 메시지 포맷 (요청 포맷)
 # ─────────────────────────────────────────────────────────────
 def format_message(results: List[Dict], start_kst: datetime, end_kst: datetime) -> str:
-    header = (
-        f"📊 세션(🇰🇷KST) {start_kst.strftime('%Y-%m-%d %H:%M')} → {end_kst.strftime('%Y-%m-%d %H:%M')}\n"
-        f"세션 저점 → 이후 고점 상승률 *TOP {min(TOP_N, len(results))}*\n"
-    )
+    day_label = start_kst.strftime("%Y-%m-%d")
+    header = f"📈 {day_label} 세션(05:00→04:59) 상승률 순위\n\n"
     lines = []
     for i, r in enumerate(results[:TOP_N], start=1):
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        flair = "🚀" if r["pct"] >= 20 else "🔥" if r["pct"] >= 10 else "⚡️"
-        lines.append(f"{medal} {r['symbol']}: {r['pct']:.2f}% {flair}")
-
-    msg = header + ("\n".join(lines) if lines else "_데이터가 없어요_")
-    if len(msg) > 3500:
-        msg = msg[:3490] + "\n…(생략)"
-    return msg
+        flair = "🔥" if r["pct"] >= 10 else "⚡️"
+        if i == 1:
+            line = f"🥇   {r['symbol']} {flair}  {r['pct']:.2f}%"
+        elif i == 2:
+            line = f"🥈   {r['symbol']} {flair}  {r['pct']:.2f}%"
+        elif i == 3:
+            line = f"🥉   {r['symbol']} {flair}  {r['pct']:.2f}%"
+        else:
+            line = f"{i}.  {r['symbol']} {flair}  {r['pct']:.2f}%"
+        lines.append(line)
+    return header + "\n\n".join(lines)
 
 # ─────────────────────────────────────────────────────────────
-# 7) 엔트리포인트
+# 7) 엔트리포인트 (Actions: 단발 실행)
 # ─────────────────────────────────────────────────────────────
 def main():
     now_utc = datetime.now(timezone.utc)
