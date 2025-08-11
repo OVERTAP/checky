@@ -1,23 +1,29 @@
-name: mexc-session-bot-hourly
+name: mexc-session-bot-30min
+
 on:
   schedule:
-    - cron: "0 * * * *"    # 매 정각(UTC) = KST 매시 :00
+    - cron: "*/30 * * * *"   # 30분 간격(UTC) → KST도 30분 간격
   workflow_dispatch: {}
+
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
       - run: |
           python -m pip install --upgrade pip
           pip install ccxt requests python-dotenv
-      - name: Run bot
+      - name: Run bot (one-shot)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WATCHLIST_PATH: "watchlist.json"
           TIMEFRAME: "5m"
-          TOP_N: "50"
+          TOP_N: "999999"           # watchlist 전부 출력
+          TREND_STEP_MIN: "30"      # 30분 간격 샘플링
+          TREND_POINTS: "6"         # 0.00 포함 최대 6개 포인트 (원하면 늘려도 됨)
+          LINES_PER_MESSAGE: "9999" # 길이 기준 자동 분할
         run: python tmp.py
