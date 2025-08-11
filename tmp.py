@@ -2,9 +2,9 @@
 """
 MEXC 세션 랭킹봇 (GitHub Actions 단발 실행)
 - 랭킹: 전일 🇰🇷KST 세션(05:00→04:59) '세션 저점→(이후)고점' 상승률
-- 트렌드(구간): 가장 가까운 05:00(KST)부터 30분 간격 '연속 구간' 증감률 (4칸)
-  * 최초 실행(수동 등, 분이 00/30이 아닐 때): 0% | Δ | Δ | Δ | HH시
-  * 이후 실행(스케줄 30분 간격): Δ | Δ | Δ | Δ
+- 30분 구간 증감률(연속 구간, 4칸):
+  * 최초 실행(FIRST_RUN=true): 0% | Δ | Δ | Δ | HH시
+  * 이후 실행(FIRST_RUN=false): Δ | Δ | Δ | Δ
   * 임계(|Δ| ≥ 2.00%): 상승 🚀 / 하락 💥 이모지 부착
 - 대상: watchlist.json 전 종목 (모두 랭킹 정렬)
 - 전송: 텔레그램 (4096자 제한 대비 자동 분할)
@@ -32,12 +32,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 WATCHLIST_PATH     = os.getenv("WATCHLIST_PATH", "watchlist.json")
 TIMEFRAME          = os.getenv("TIMEFRAME", "5m")
-TOP_N              = int(os.getenv("TOP_N", "999999"))      # 전체 출력 기본
-TREND_STEP_MIN     = int(os.getenv("TREND_STEP_MIN", "30")) # 30분 고정 권장
-TREND_COUNT        = int(os.getenv("TREND_COUNT", "4"))     # 구간 4칸
-LINES_PER_MESSAGE  = int(os.getenv("LINES_PER_MESSAGE", "9999"))  # 메시지 분할(랭킹 줄 기준)
-# 강렬 이모지 임계
+TOP_N              = int(os.getenv("TOP_N", "999999"))           # 전체 출력 기본
+TREND_STEP_MIN     = int(os.getenv("TREND_STEP_MIN", "30"))      # 30분 고정 권장
+TREND_COUNT        = int(os.getenv("TREND_COUNT", "4"))          # 구간 4칸
+LINES_PER_MESSAGE  = int(os.getenv("LINES_PER_MESSAGE", "9999")) # 메시지 분할(랭킹 줄 기준)
 DELTA_EMOJI_THRESH = float(os.getenv("DELTA_EMOJI_THRESH", "2.0"))  # 2.00%
+FIRST_RUN          = os.getenv("FIRST_RUN", "false").lower() in ("1", "true", "yes")
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     raise RuntimeError("⚠️ TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 가 비었어요.")
@@ -146,13 +146,13 @@ def compute_session_performance(ex, symbol: str, since_ms: int, until_ms: int, t
     return {"symbol": symbol, "pct": pct, "low": low_price, "high": high_price, "low_ts": low_ts, "high_ts": high_ts}
 
 # ─────────────────────────────────────────────────────────────
-# 5) 30분 '연속 구간' 증감률 4칸 계산
+# 5) 마지막 n개 30분 '연속 구간' 증감률 계산
 # ─────────────────────────────────────────────────────────────
-def last_n_interval_deltas_30m(ex, symbol: str, base_5am_kst: datetime, now_utc: datetime, n: int) -> List[float]:
+def last_n_interval_deltas(ex, symbol: str, base_5am_kst: datetime, now_utc: datetime, step_min: int, n: int) -> List[float]:
     """
-    05:00 KST부터 30분 간격 경계(B0,B1,...)의 '가격'을 만들고,
-    마지막 n개의 '연속 구간' 증감률 Δ_i = (P_i - P_{i-1})/P_{i-1}*100을 반환.
-    경계 가격 P_i는 해당 경계 시각 '이하' 마지막 캔들의 close(5m) 사용.
+    05:00 KST부터 step_min 간격 경계(B0,B1,...)에서 경계가치 P_i를 만들고
+    Δ_i = (P_i - P_{i-1})/P_{i-1}*100 (연속 구간 수익률).
+    P_i는 경계 시각 '이하' 마지막 캔들 close(5m) 사용.
     """
     start_ms = to_ms(base_5am_kst)
     try:
@@ -163,30 +163,26 @@ def last_n_interval_deltas_30m(ex, symbol: str, base_5am_kst: datetime, now_utc:
     if not ohlcv:
         return []
 
-    # 경계 생성
     now_kst = now_utc.astimezone(KST)
-    # 마지막 경계는 '현재 시각을 넘지 않는' 30분 스텝
     minutes_from_base = int((now_kst - base_5am_kst).total_seconds() // 60)
-    last_step_index = minutes_from_base // 30  # B_last
+    last_step_index = minutes_from_base // step_min
     if last_step_index < 1:
         return []  # 구간이 하나도 완성되지 않음
 
-    boundaries = [base_5am_kst + timedelta(minutes=30 * i) for i in range(0, last_step_index + 1)]
+    boundaries = [base_5am_kst + timedelta(minutes=step_min * i) for i in range(0, last_step_index + 1)]
 
-    # 각 경계의 P_i 선택 (<= 경계 시각 가장 최근 close)
+    # 경계 가격들 P_i (<= 경계시각 가장 최근 close)
     prices = []
     idx = 0
     for b in boundaries:
         b_ms = to_ms(b)
         while idx + 1 < len(ohlcv) and ohlcv[idx + 1][0] <= b_ms:
             idx += 1
-        # 경계 이전 데이터가 하나도 없을 수 있음 → 스킵
         if idx < len(ohlcv) and ohlcv[idx][0] <= b_ms and ohlcv[idx][4] and ohlcv[idx][4] > 0:
             prices.append(float(ohlcv[idx][4]))
         else:
             prices.append(None)
 
-    # Δ 계산
     deltas = []
     for i in range(1, len(prices)):
         p_prev, p_cur = prices[i-1], prices[i]
@@ -195,10 +191,7 @@ def last_n_interval_deltas_30m(ex, symbol: str, base_5am_kst: datetime, now_utc:
         else:
             deltas.append(0.0)
 
-    # 마지막 n개
-    if len(deltas) >= n:
-        return deltas[-n:]
-    return deltas
+    return deltas[-n:] if len(deltas) >= n else deltas
 
 # ─────────────────────────────────────────────────────────────
 # 6) 메시지 포맷 + 분할 전송
@@ -218,7 +211,6 @@ def format_rank_line(rank: int, symbol: str, pct: float) -> str:
         return f"{rank}.  {symbol} {flair}  {pct:.2f}%"
 
 def _fmt_delta(v: float) -> str:
-    # 부호 항상 표시
     s = f"{v:+.2f}%"
     if v >= DELTA_EMOJI_THRESH:
         return f"{s} 🚀"
@@ -226,24 +218,21 @@ def _fmt_delta(v: float) -> str:
         return f"{s} 💥"
     return s
 
-def format_delta_line(deltas: List[float], first_run_style: bool, now_kst: datetime) -> str:
+def format_delta_line(deltas: List[float], first_run_flag: bool, now_kst: datetime) -> str:
     """
-    first_run_style: 0% | Δ | Δ | Δ | HH시
-    else           : Δ | Δ | Δ | Δ
+    최초 실행: 0% | Δ | Δ | Δ | HH시
+    이후 실행: Δ | Δ | Δ | Δ
     """
     if not deltas:
         return "      -"
     parts = [_fmt_delta(v) for v in deltas]
-    if first_run_style:
+    if first_run_flag:
+        show3 = parts[-3:] if len(parts) >= 3 else parts
         hour_label = f"{now_kst.strftime('%H')}시"
-        # 최초 실행은 '0%'를 맨 앞에 추가하고 끝에 'HH시'
-        # 델타 3개만 보여주고 총 4칸 맞춤 (요구사항)
-        show = parts[-3:] if len(parts) >= 3 else parts  # 부족하면 있는 만큼
-        return "      " + " | ".join(["0%"] + show + [hour_label])
-    # 이후 실행: 4칸 그대로
+        return "      " + " | ".join(["0%"] + show3 + [hour_label])
     return "      " + " | ".join(parts[-TREND_COUNT:])
 
-def send_ranked_messages(day_label: str, ranked: List[Dict], trend_map: Dict[str, List[float]], first_run_style: bool, now_kst: datetime) -> None:
+def send_ranked_messages(day_label: str, ranked: List[Dict], trend_map: Dict[str, List[float]], first_run_flag: bool, now_kst: datetime) -> None:
     header = format_block_header(day_label)
     buf = header
     lines_in_msg = 0
@@ -258,7 +247,7 @@ def send_ranked_messages(day_label: str, ranked: List[Dict], trend_map: Dict[str
 
     for item in ranked:
         line1 = format_rank_line(rank, item["symbol"], item["pct"])
-        line2 = format_delta_line(trend_map.get(item["symbol"], []), first_run_style, now_kst)
+        line2 = format_delta_line(trend_map.get(item["symbol"], []), first_run_flag, now_kst)
         chunk = ("\n\n" if lines_in_msg > 0 or header in buf else "") + line1 + "\n" + line2
 
         if lines_in_msg + 1 > LINES_PER_MESSAGE or len(buf) + len(chunk) > 3500:
@@ -285,11 +274,8 @@ def main():
     start_kst, end_kst = previous_kst_session_bounds(now_utc)
     since_ms, until_ms = to_ms(start_kst), to_ms(end_kst)
 
-    # 트렌드용 기준 05:00
+    # 트렌드 기준 05:00
     base_5am_kst = latest_5am_kst_at_or_before(now_utc)
-
-    # "최초 실행" 자동 판별: 분이 00/30이 아니면 최초 스타일로 간주
-    first_run_style = (now_kst.minute % 30 != 0)
 
     ex = create_mexc_swap()
     markets = ex.markets
@@ -312,17 +298,16 @@ def main():
         time.sleep(max(0.15, getattr(ex, "rateLimit", 200) / 1000.0))
     results.sort(key=lambda x: x["pct"], reverse=True)
 
-    # 30분 연속 구간 Δ 계산 (4칸)
+    # 30분 연속 구간 Δ (항상 '최근 4개' 받아서 전달)
     trend_map: Dict[str, List[float]] = {}
     for s in valid_syms:
-        deltas = last_n_interval_deltas_30m(ex, s, base_5am_kst, now_utc, TREND_COUNT)
-        # 델타가 4칸 미만이면 앞쪽을 0으로 채우지 않고, 있는 만큼만 출력(요청 취지대로)
+        deltas = last_n_interval_deltas(ex, s, base_5am_kst, now_utc, TREND_STEP_MIN, TREND_COUNT)
         trend_map[s] = deltas
         time.sleep(max(0.1, getattr(ex, "rateLimit", 200) / 1000.0))
 
     # 전송
     day_label = start_kst.strftime("%Y-%m-%d")
-    send_ranked_messages(day_label, results[:TOP_N], trend_map, first_run_style, now_kst)
+    send_ranked_messages(day_label, results[:TOP_N], trend_map, FIRST_RUN, now_kst)
 
 if __name__ == "__main__":
     main()
